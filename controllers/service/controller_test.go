@@ -639,7 +639,15 @@ func TestNodeChangesInExternalLoadBalancer(t *testing.T) {
 			defer cancel()
 			controller.nodeLister = newFakeNodeLister(tc.nodeListerErr, tc.nodes...)
 			servicesToRetry := controller.updateLoadBalancerHosts(ctx, services, tc.worker)
-			compareServiceList(t, tc.expectedRetryServices, servicesToRetry)
+			var servicesToRetryList []*v1.Service
+			for key := range servicesToRetry {
+				cachedService, exist := controller.cache.get(key)
+				if !exist {
+					t.Errorf("Service '%s' should be in the cache", key)
+				}
+				servicesToRetryList = append(servicesToRetryList, cachedService.state)
+			}
+			compareServiceList(t, tc.expectedRetryServices, servicesToRetryList)
 			compareUpdateCalls(t, tc.expectedUpdateCalls, cloud.UpdateCalls)
 			cloud.UpdateCalls = []fakecloud.UpdateBalancerCall{}
 		})
@@ -1834,6 +1842,37 @@ func TestMarkAndUnmarkFullSync(t *testing.T) {
 	if ret != false {
 		t.Errorf("expect ret == false, but got true")
 	}
+}
+
+// TestNodeSyncInternal verfies if Services are correctly updated.
+func TestNodeSyncInternal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controller, _, client := newController()
+
+	ns0, svc0 := "ns0", "svc0"
+	key0 := fmt.Sprintf("%s/%s", ns0, svc0)
+	controller.servicesToUpdate = map[string]bool{
+		key0: true,
+	}
+	expectedSvc := v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      svc0,
+			Namespace: ns0,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: map[string]string{"test": "nodeSyncInternal"},
+		},
+	}
+	controller.cache.serviceMap = map[string]*cachedService{
+		key0: {&expectedSvc},
+	}
+	controller.nodeSyncInternal(ctx, 1)
+	actualSvc, err := client.CoreV1().Services(ns0).Get(ctx, svc0, metav1.GetOptions{})
+	if err != nil {
+		t.Errorf("failed to get Service '%s'", key0)
+	}
+	compareServiceList(t, []*v1.Service{actualSvc}, []*v1.Service{&expectedSvc})
 }
 
 func tryReadFromChannel(t *testing.T, ch chan interface{}, expectValue bool) {
